@@ -3,6 +3,7 @@ package zk
 import (
 	"github.com/consensys/gnark/frontend"
 	"github.com/consensys/gnark/std/hash/mimc"
+	"github.com/consensys/gnark/std/math/bits"
 )
 
 const MerkleDepth = 7 // 128 leaves
@@ -12,10 +13,12 @@ type ShotCircuit struct {
 	Bit  frontend.Variable              `gnark:",secret"`
 	Path [MerkleDepth]frontend.Variable `gnark:",secret"`
 	Dir  [MerkleDepth]frontend.Variable `gnark:",secret"`
-
 	Salt frontend.Variable `gnark:",secret"`
+
 	Root frontend.Variable `gnark:",public"`
 	Hit  frontend.Variable `gnark:",public"`
+	Row  frontend.Variable `gnark:",public"`
+	Col  frontend.Variable `gnark:",public"`
 }
 
 func (c *ShotCircuit) Define(api frontend.API) error {
@@ -23,7 +26,6 @@ func (c *ShotCircuit) Define(api frontend.API) error {
 	api.AssertIsBoolean(c.Hit)      // Hit ∈ {0,1}
 	api.AssertIsEqual(c.Hit, c.Bit) // reveal only Hit = Bit
 
-	// leaf hash = MiMC(Bit)  (v0.14 returns (MiMC, error))
 	h, err := mimc.NewMiMC(api)
 	if err != nil {
 		return err
@@ -55,5 +57,15 @@ func (c *ShotCircuit) Define(api frontend.API) error {
 	salted := hSalt.Sum()
 
 	api.AssertIsEqual(salted, c.Root)
+
+	// make sure its the correct index
+	idx := api.Add(api.Mul(c.Row, 10), c.Col) // idx = row*10 + col
+	idxBits := bits.ToBinary(api, idx, bits.WithNbDigits(MerkleDepth))
+
+	for i := 0; i < MerkleDepth; i++ {
+		api.AssertIsBoolean(idxBits[i])
+		api.AssertIsEqual(c.Dir[i], idxBits[i])
+	}
+	
 	return nil
 }

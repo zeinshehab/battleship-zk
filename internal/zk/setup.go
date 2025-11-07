@@ -17,6 +17,8 @@ import (
 type ShotPublic struct {
 	Root *big.Int `json:"root"`
 	Hit  uint8    `json:"hit"`
+	Row  uint8    `json:"row"`
+	Col  uint8    `json:"col"`
 }
 
 // Ensure proving/verifying keys exist (reads/writes via io.ReaderFrom / io.WriterTo).
@@ -63,9 +65,14 @@ func ProveShot(keysDir string, bit uint8, idx int, path []*big.Int, dir []uint8,
 
 	saltedRoot := merkle.HashNodeMiMC(salt, root)
 
+	row := uint8(idx / 10)
+	col := uint8(idx % 10)
+
 	pub := ShotPublic{
 		Root: new (big.Int).Set(saltedRoot),
 		Hit:  bit,
+		Row:  row,
+		Col:  col,
 	}
 
 	assign := ShotCircuit{
@@ -73,19 +80,18 @@ func ProveShot(keysDir string, bit uint8, idx int, path []*big.Int, dir []uint8,
 		Salt: salt,
 		Root: saltedRoot,
 		Hit:  bit,
+		Row:  row,
+		Col:  col,
 	}
 
-	// Witness assignment for the full circuit
-	// var assign ShotCircuit
+	// witness assignment for the full circuit
 	assign.Bit = bit
 	for i := 0; i < MerkleDepth; i++ {
 		assign.Path[i] = path[i]
 		assign.Dir[i] = dir[i]
 	}
-	// assign.Root = root
-	// assign.Hit = bit
 
-	// Compile and load PK
+	// compile and load PK
 	var circuit ShotCircuit
 	cs, err := frontend.Compile(ecc.BN254.ScalarField(), r1cs.NewBuilder, &circuit)
 	if err != nil {
@@ -96,7 +102,7 @@ func ProveShot(keysDir string, bit uint8, idx int, path []*big.Int, dir []uint8,
 		return nil, ShotPublic{}, err
 	}
 
-	// Full witness and prove
+	// full witness and prove
 	fullWit, err := frontend.NewWitness(&assign, ecc.BN254.ScalarField())
 	if err != nil {
 		return nil, ShotPublic{}, err
@@ -106,7 +112,7 @@ func ProveShot(keysDir string, bit uint8, idx int, path []*big.Int, dir []uint8,
 		return nil, ShotPublic{}, err
 	}
 
-	// Serialize proof
+	// serialize proof
 	var buf bytes.Buffer
 	if _, err := proof.WriteTo(&buf); err != nil {
 		return nil, ShotPublic{}, err
@@ -123,10 +129,14 @@ func VerifyShot(vkPath string, proofBin []byte, pub ShotPublic, root *big.Int) (
 		return false, errors.New("root mismatch: proof root != --root")
 	}
 
-	// Build a PUBLIC-ONLY witness using the actual circuit type (so it implements frontend.Circuit).
-	var pubAssign ShotCircuit
-	pubAssign.Root = root
-	pubAssign.Hit = pub.Hit
+	// build a PUBLIC ONLY witness using the actual circuit type (so it implements frontend.Circuit).
+
+	pubAssign := ShotCircuit{
+		Root: root,
+		Hit:  pub.Hit,
+		Row:  pub.Row,
+		Col:  pub.Col,
+	}
 
 	pubWit, err := frontend.NewWitness(&pubAssign, ecc.BN254.ScalarField(), frontend.PublicOnly())
 	if err != nil {
