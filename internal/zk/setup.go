@@ -10,6 +10,8 @@ import (
 	"github.com/consensys/gnark-crypto/ecc"
 	"github.com/consensys/gnark/frontend"
 	"github.com/consensys/gnark/frontend/cs/r1cs"
+
+	"battleship-zk/internal/merkle"
 )
 
 type ShotPublic struct {
@@ -54,20 +56,34 @@ func EnsureShotKeys(dir string) error {
 }
 
 // Prove one shot.
-func ProveShot(keysDir string, bit uint8, idx int, path []*big.Int, dir []uint8, root *big.Int) ([]byte, ShotPublic, error) {
+func ProveShot(keysDir string, bit uint8, idx int, path []*big.Int, dir []uint8, root *big.Int, salt *big.Int) ([]byte, ShotPublic, error) {
 	if len(path) != MerkleDepth || len(dir) != MerkleDepth {
 		return nil, ShotPublic{}, errors.New("bad path length")
 	}
 
+	saltedRoot := merkle.HashNodeMiMC(salt, root)
+
+	pub := ShotPublic{
+		Root: new (big.Int).Set(saltedRoot),
+		Hit:  bit,
+	}
+
+	assign := ShotCircuit{
+		Bit:  bit,
+		Salt: salt,
+		Root: saltedRoot,
+		Hit:  bit,
+	}
+
 	// Witness assignment for the full circuit
-	var assign ShotCircuit
+	// var assign ShotCircuit
 	assign.Bit = bit
 	for i := 0; i < MerkleDepth; i++ {
 		assign.Path[i] = path[i]
 		assign.Dir[i] = dir[i]
 	}
-	assign.Root = root
-	assign.Hit = bit
+	// assign.Root = root
+	// assign.Hit = bit
 
 	// Compile and load PK
 	var circuit ShotCircuit
@@ -95,7 +111,7 @@ func ProveShot(keysDir string, bit uint8, idx int, path []*big.Int, dir []uint8,
 	if _, err := proof.WriteTo(&buf); err != nil {
 		return nil, ShotPublic{}, err
 	}
-	return buf.Bytes(), ShotPublic{Root: new(big.Int).Set(root), Hit: bit}, nil
+	return buf.Bytes(), pub, nil
 }
 
 // Verify a shot proof. (Verify returns only error; nil => valid)

@@ -5,20 +5,30 @@ import (
 	"math/big"
 
 	bnmimc "github.com/consensys/gnark-crypto/ecc/bn254/fr/mimc"
+	fr "github.com/consensys/gnark-crypto/ecc/bn254/fr"
+
 )
 
-// --- encode BN254 field elements as 32-byte big-endian ---
 func feBytes(x *big.Int) []byte {
-	b := x.Bytes()
+	// reduce mod p to be safe
+	z := new(big.Int).Mod(x, fr.Modulus())
+
+	b := z.Bytes()
 	if len(b) == 32 {
 		return b
 	}
 	out := make([]byte, 32)
-	copy(out[32-len(b):], b)
+	copy(out[32-len(b):], b) // left pad with zeros
 	return out
 }
 
-func bytesToFE(b []byte) *big.Int { return new(big.Int).SetBytes(b) }
+// maps bytes to a field element modulo p.
+func bytesToFE(b []byte) *big.Int {
+	z := new(big.Int).SetBytes(b) 
+	z.Mod(z, fr.Modulus())
+	return z
+}
+
 
 // MiMC helpers (off-chain), consistent with in-circuit MiMC
 func HashLeafMiMC(bit uint8) *big.Int {

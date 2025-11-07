@@ -13,12 +13,14 @@ type ShotCircuit struct {
 	Path [MerkleDepth]frontend.Variable `gnark:",secret"`
 	Dir  [MerkleDepth]frontend.Variable `gnark:",secret"`
 
+	Salt frontend.Variable `gnark:",secret"`
 	Root frontend.Variable `gnark:",public"`
 	Hit  frontend.Variable `gnark:",public"`
 }
 
 func (c *ShotCircuit) Define(api frontend.API) error {
 	api.AssertIsBoolean(c.Bit)      // Bit ∈ {0,1}
+	api.AssertIsBoolean(c.Hit)      // Hit ∈ {0,1}
 	api.AssertIsEqual(c.Hit, c.Bit) // reveal only Hit = Bit
 
 	// leaf hash = MiMC(Bit)  (v0.14 returns (MiMC, error))
@@ -42,6 +44,16 @@ func (c *ShotCircuit) Define(api frontend.API) error {
 		curr = h.Sum()
 	}
 
-	api.AssertIsEqual(curr, c.Root)
+	treeRoot := curr
+
+	hSalt, err := mimc.NewMiMC(api)
+	if err != nil {
+		return err
+	}
+	hSalt.Reset()
+	hSalt.Write(c.Salt, treeRoot)
+	salted := hSalt.Sum()
+
+	api.AssertIsEqual(salted, c.Root)
 	return nil
 }

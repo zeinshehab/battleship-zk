@@ -10,6 +10,8 @@ import (
 type Secret struct {
 	Board game.Board   `json:"board"`
 	Tree  *merkle.Tree `json:"tree"`
+	SaltHex string       `json:"salt_hex"` // new: board-level random salt in hex
+
 }
 
 // ShotProofPayload is what `shoot` writes and `verify` reads.

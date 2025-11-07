@@ -8,6 +8,7 @@ import (
 	"log"
 	"math/big"
 	"os"
+	"crypto/rand"
 
 	"battleship-zk/internal/codec"
 	"battleship-zk/internal/game"
@@ -72,16 +73,28 @@ func cmdCommit() {
 	zeroLeaf := leafHash(0)
 	t, err := merkle.BuildFixedTree(b.Flatten(), 128, zeroLeaf, merkle.HashNodeMiMC)
 	if err != nil { log.Fatal(err) }
-	root := t.Root()
-	fmt.Println("ROOT:", fmt.Sprintf("0x%x", root))
+	treeRoot := t.Root()
+
+	saltBytes := make([]byte, 32)
+	if _, err := rand.Read(saltBytes); err != nil {
+		log.Fatal(err)
+	}
+	salt := new(big.Int).SetBytes(saltBytes)
+
+	saltedRoot := merkle.HashNodeMiMC(salt, treeRoot)
+
+	fmt.Println("ROOT:", fmt.Sprintf("0x%x", saltedRoot))
+	// fmt.Println("SALT:", fmt.Sprintf("0x%x", salt))
+	// fmt.Println("Unsalted ROOT:", fmt.Sprintf("0x%x", treeRoot))
 
 	// Create ZK keys (or load if exist)
 	if err := zk.EnsureShotKeys(*keysDir); err != nil { log.Fatal(err) }
 
 	// Save defender secret (board + tree)
 	sec := codec.Secret{
-		Board: b,
-		Tree:  t,
+		Board:  b,
+		Tree:   t,
+		SaltHex: fmt.Sprintf("0x%x", salt),
 	}
 	if err := saveJSON(*secretPath, &sec); err != nil { log.Fatal(err) }
 	fmt.Println("✓ wrote", *secretPath)
@@ -106,7 +119,21 @@ func cmdShoot() {
 	if err != nil { log.Fatal(err) }
 	if len(path) != zk.MerkleDepth || len(dir) != zk.MerkleDepth { log.Fatal("bad path length") }
 
-	proof, pub, err := zk.ProveShot(*keysDir, bit, idx, path, dir, sec.Tree.Root())
+	if sec.SaltHex == "" {
+		log.Fatal("missing salt in secret.json")
+	}
+
+	if len(sec.SaltHex) < 3 || sec.SaltHex[:2] != "0x" {
+		log.Fatal("invalid salt hex format")
+	}
+	salt, ok := new(big.Int).SetString(sec.SaltHex[2:], 16)
+	if !ok {
+		log.Fatal("can't parse salt hex value")
+	}
+
+	treeRoot := sec.Tree.Root()
+
+	proof, pub, err := zk.ProveShot(*keysDir, bit, idx, path, dir, treeRoot, salt)
 	if err != nil { log.Fatal(err) }
 
 	payload := codec.ShotProofPayload{ Proof: proof, Public: pub }
