@@ -146,6 +146,8 @@ func cmdVerify() {
 	vkPath := fs.String("vk", "./keys/shot.vk", "verifying key file")
 	rootHex := fs.String("root", "", "root hex prefixed 0x")
 	proofPath := fs.String("proof", "proof.json", "proof payload json")
+	row := fs.Int("row", -1, "row [0..9]")
+	col := fs.Int("col", -1, "col [0..9]")
 	_ = fs.Parse(os.Args[2:])
 
 	if *rootHex == "" { log.Fatal("--root required") }
@@ -154,6 +156,14 @@ func cmdVerify() {
 
 	var payload codec.ShotProofPayload
 	if err := loadJSON(*proofPath, &payload); err != nil { log.Fatal(err) }
+
+	if *row < 0 || *row > 9 || *col < 0 || *col > 9 {
+		log.Fatal("row/col out of range")
+	}
+
+	if payload.Public.Row != uint8(*row) || payload.Public.Col != uint8(*col) {
+		log.Fatalf("Proof is for (%d, %d) but expected (%d, %d)", payload.Public.Row, payload.Public.Col, *row, *col)
+	}
 
 	res, err := zk.VerifyShot(*vkPath, payload.Proof, payload.Public, root)
 	if err != nil { log.Fatal(err) }
