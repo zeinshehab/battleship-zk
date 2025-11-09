@@ -65,3 +65,16 @@ Same thing but each player has his own board and keys this time
 `./battleship verify --vk ./keysB/shot.vk --root 0xROOT_B --row r --col c --proof proof_r_c.json`
 
 Then we just swap the roles for A to defend and B to attack.
+
+### How to play on Web UI
+
+Create one folder for each player containing the game executable.
+
+Example of how to run the server for Player A
+```
+./battleship serve --addr :8080 --keys ./keysA --secret ./secretA.json
+```
+
+Go to your chosen browser and enter the ip with your chosen port number.
+
+Place the IP and the port number of your opponent and Play !
