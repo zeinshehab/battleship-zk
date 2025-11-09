@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <title>Battleship-ZK</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <link rel="stylesheet" href="styles.css"/>
+</head>
+<body>
+  <div class="app">
+    <h1>Battleship-ZK</h1>
+
+    <div class="controls">
+      <label>
+        Opponent URL (e.g. http://localhost:8081):
+        <input id="opponentUrl" type="text" placeholder="http://localhost:8081"/>
+      </label>
+      <button id="startBtn">Start</button>
+      <span id="status"></span>
+    </div>
+
+    <div class="boards">
+      <div class="board-container">
+        <h2>Your Board</h2>
+        <div id="yourBoard" class="board"></div>
+        <small>Ships are shown in light gray.</small>
+      </div>
+
+      <div class="board-container">
+        <h2>Opponent Board</h2>
+        <div id="oppBoard" class="board"></div>
+        <small>Click to shoot. Green=hit, Red=miss.</small>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
