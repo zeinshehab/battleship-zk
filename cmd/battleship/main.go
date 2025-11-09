@@ -9,7 +9,9 @@ import (
 	"math/big"
 	"os"
 	"crypto/rand"
+    "net/http"
 
+	"battleship-zk/internal/server"
 	"battleship-zk/internal/codec"
 	"battleship-zk/internal/game"
 	"battleship-zk/internal/merkle"
@@ -30,6 +32,8 @@ func main() {
 		cmdShoot()
 	case "verify":
 		cmdVerify()
+	case "serve":
+        cmdServe() 
 	default:
 		usage()
 	}
@@ -170,6 +174,30 @@ func cmdVerify() {
 	if !res { log.Fatal(errors.New("invalid proof")) }
 	if payload.Public.Hit != 0 && payload.Public.Hit != 1 { log.Fatal("invalid hit") }
 	fmt.Println(map[uint8]string{0:"MISS",1:"HIT"}[payload.Public.Hit])
+}
+
+func cmdServe() {
+    fs := flag.NewFlagSet("serve", flag.ExitOnError)
+    addr := fs.String("addr", ":8080", "listen address")
+    keys := fs.String("keys", "./keys", "keys directory")
+    secret := fs.String("secret", "secret.json", "defender secret file")
+    _ = fs.Parse(os.Args[2:])
+
+    // Ensure keys exist (optional)
+    if err := zk.EnsureShotKeys(*keys); err != nil {
+        log.Fatal(err)
+    }
+
+    // Create server and routes
+	srv := server.New(*keys, *secret)
+	mux := http.NewServeMux()
+	srv.Routes(mux)
+	log.Println("Serving on", *addr)
+	log.Fatal(http.ListenAndServe(*addr, server.WithCORS(mux)))
+
+
+    log.Println("Serving on", *addr)
+    log.Fatal(http.ListenAndServe(*addr, mux))
 }
 
 func saveJSON(path string, v any) error {
