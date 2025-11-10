@@ -27,6 +27,7 @@ type Server struct {
 	KeysDir    string
 	SecretPath string
 	VKPath     string // e.g., KeysDir + "/shot.vk"
+	shotsTried map[string]bool 
 
 	TurnPath string // persisted turn state JSON next to secret
 	PeerPath string // persisted peer info JSON next to secret
@@ -36,6 +37,9 @@ type Server struct {
 	mu   sync.RWMutex
 	sec  *codec.Secret
 	peer *PeerInfo
+
+	startAt int64 // milliseconds since epoch; when THIS server booted
+
 
 	GamePath string // New
 
@@ -53,12 +57,16 @@ func New(keysDir, secretPath string) *Server {
 		KeysDir:    keysDir,
 		SecretPath: secretPath,
 		VKPath:     filepath.Join(keysDir, "shot.vk"),
+		shotsTried: make(map[string]bool),
+		startAt:    time.Now().UnixMilli(), // NEW
+
 	}
 	dir := filepath.Dir(secretPath)
 	s.TurnPath = filepath.Join(dir, "turn.json")
 	s.PeerPath = filepath.Join(dir, "peer.json")
 	s.ShotsPath = filepath.Join(dir, "last_shot.json") 
 	s.GamePath = filepath.Join(dir, "game.json")
+	
 	_ = s.ensureTurn()
 	_ = s.loadPeer()
 	_ = s.ensureGame()
@@ -237,6 +245,55 @@ func (s *Server) handleShoot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	t, err := s.loadTurn()
+    if err != nil {
+        writeJSON(w, 500, map[string]string{"error": "failed to load turn state"})
+        return
+    }
+    if !t.Ready || t.MyTurn != "opponent" {
+        writeJSON(w, 409, map[string]any{
+            "error":   "not allowed: it's not opponent's turn to shoot",
+            "myTurn":  t.MyTurn,
+            "ready":   t.Ready,
+            "decided": t.Decided,
+        })
+        return
+    }
+    // Optional: block if game already over
+    if g, gErr := s.loadGame(); gErr == nil && g.Over {
+        writeJSON(w, 409, map[string]any{
+            "error":     "game is over",
+            "winner":    g.Winner,
+            "hitsTaken": g.HitsTaken,
+            "hitsDealt": g.HitsDealt,
+        })
+        return
+    }
+
+	// --- Duplicate-shot gating (with reservation to avoid races) ---
+    k := shotKey(req.Row, req.Col)
+
+    s.mu.Lock()
+    if s.shotsTried == nil {
+        s.shotsTried = make(map[string]bool)
+    }
+    if s.shotsTried[k] {
+        s.mu.Unlock()
+        writeJSON(w, 409, map[string]any{
+            "error":   "cell already targeted",
+            "row":     req.Row,
+            "col":     req.Col,
+            "myTurn":  t.MyTurn,
+            "ready":   t.Ready,
+            "decided": t.Decided,
+        })
+        return
+    }
+    // Reserve this cell to close the race window while we compute proof
+    s.shotsTried[k] = true
+    s.mu.Unlock()
+
+
 	sec, err := s.currentSecret()
 	if err != nil {
 		writeJSON(w, 400, map[string]string{"error": err.Error()})
@@ -245,6 +302,16 @@ func (s *Server) handleShoot(w http.ResponseWriter, r *http.Request) {
 
 	res, err := app.Shoot(*sec, s.KeysDir, req.Row, req.Col)
 	// defender received a shot; remember it so UI can color own board
+
+	if err != nil {
+        // Roll back reservation on failure so attacker can retry a valid request later
+        s.mu.Lock()
+        delete(s.shotsTried, k)
+        s.mu.Unlock()
+
+        writeJSON(w, 400, map[string]string{"error": err.Error()})
+        return
+    }
 	s.recordShot(req.Row, req.Col, res.Bit) 
 
 	// New
@@ -327,6 +394,32 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]string{"error": "bad json: " + err.Error()})
 		return
 	}
+
+	// === turn gating for attacker-side verify ===
+    t, err := s.loadTurn()
+    if err != nil {
+        writeJSON(w, 500, map[string]string{"error": "failed to load turn state"})
+        return
+    }
+    if !t.Ready || t.MyTurn != "me" {
+        writeJSON(w, 409, map[string]any{
+            "error":   "not allowed: it's not our turn to verify an attack",
+            "myTurn":  t.MyTurn,
+            "ready":   t.Ready,
+            "decided": t.Decided,
+        })
+        return
+    }
+    if g, gErr := s.loadGame(); gErr == nil && g.Over {
+        writeJSON(w, 409, map[string]any{
+            "error":     "game is over",
+            "winner":    g.Winner,
+            "hitsTaken": g.HitsTaken,
+            "hitsDealt": g.HitsDealt,
+        })
+        return
+    }
+    // ======
 
 	if strings.TrimSpace(req.VKB64) == "" {
 		writeJSON(w, 400, map[string]string{"error": "vkB64 required (use defender's VK)"}); return
@@ -626,23 +719,78 @@ func (s *Server) saveTurn(t *turnState) error {
 // 	}
 // }
 
+func normalizeID(sid string) string {
+    sid = strings.TrimSpace(sid)
+    sid = strings.TrimRight(sid, "/")
+    return strings.ToLower(sid)
+}
+
 func (s *Server) updateTurn(mut func(*turnState)) (*turnState, error) {
     if err := s.ensureTurn(); err != nil { return nil, err }
     t, err := s.loadTurn()
     if err != nil { return nil, err }
+
+    // Apply mutation (may set MyID/OppID, etc.)
     mut(t)
-    decideOnce(t)
+
+    myID  := normalizeID(t.MyID)
+    oppID := normalizeID(t.OppID)
+    haveIDs := myID != "" && oppID != ""
+
+    online, oppStarted := false, int64(0)
+    if haveIDs {
+        online, oppStarted = s.peerStatus(oppID) // reads /v1/turn
+    }
+
+    // If already decided, never change who starts; just refresh connectivity flag.
+    if t.Decided {
+        t.Ready = haveIDs && online
+        if err := s.saveTurn(t); err != nil { return nil, err }
+        return t, nil
+    }
+
+    // Decide exactly once when BOTH have valid start timestamps
+    myStarted := s.startAt
+    if haveIDs && online && myStarted > 0 && oppStarted > 0 {
+        var iStart bool
+        if myStarted != oppStarted {
+            iStart = myStarted < oppStarted // earlier server starts
+        } else {
+            // Tie (millisecond collision). Break deterministically by normalized IDs.
+            iStart = myID < oppID
+        }
+        if iStart { t.MyTurn = "me" } else { t.MyTurn = "opponent" }
+        t.Ready = true
+        t.Decided = true
+    } else {
+        // Not ready to decide yet
+        t.Ready = false
+        t.Decided = false
+        // leave MyTurn as-is (likely "")
+    }
+
     if err := s.saveTurn(t); err != nil { return nil, err }
     return t, nil
 }
 
 // GET /v1/turn
 func (s *Server) handleTurnGet(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet { w.WriteHeader(http.StatusMethodNotAllowed); return }
-	t, err := s.loadTurn()
-	if err != nil { writeJSON(w, 500, map[string]string{"error": err.Error()}); return }
-	writeJSON(w, 200, t)
+    if r.Method != http.MethodGet { w.WriteHeader(http.StatusMethodNotAllowed); return }
+    t, err := s.loadTurn()
+    if err != nil { writeJSON(w, 500, map[string]string{"error": err.Error()}); return }
+    writeJSON(w, 200, map[string]any{
+        "myTurn":     t.MyTurn,
+        "myRootHex":  t.MyRootHex,
+        "oppRootHex": t.OppRootHex,
+        "ready":      t.Ready,
+        "decided":    t.Decided,
+        "myId":       t.MyID,
+        "oppId":      t.OppID,
+        // NEW (authoritative liveness marker):
+        "startedAt":  s.startAt, // ms since epoch
+    })
 }
+
 
 // POST /v1/turn/self  { "baseUrl": "http://localhost:8080" }
 type turnSelfReq struct{ BaseURL string `json:"baseUrl"` }
@@ -654,8 +802,18 @@ func (s *Server) handleTurnSetSelf(w http.ResponseWriter, r *http.Request) {
 	}
 	t, err := s.updateTurn(func(t *turnState){ t.MyID = strings.TrimRight(req.BaseURL, "/") })
 	if err != nil { writeJSON(w,500,map[string]string{"error":err.Error()}); return }
+
+	// If opponent ID is set but not online, signal it explicitly
+	if strings.TrimSpace(t.OppID) != "" && !t.Ready {
+		writeJSON(w, 409, map[string]any{
+			"error":   "opponent is offline; turns not decided",
+			"myTurn":  t.MyTurn, "ready": t.Ready, "decided": t.Decided, "oppId": t.OppID,
+		})
+		return
+	}
 	writeJSON(w,200,map[string]any{"ok":true,"myTurn":t.MyTurn,"decided":t.Decided,"ready":t.Ready})
 }
+
 
 // POST /v1/turn/opponent  { "rootHex":"0x..", "baseUrl":"http://localhost:8081" }
 type turnOppReq struct {
@@ -673,8 +831,22 @@ func (s *Server) handleTurnSetOppRoot(w http.ResponseWriter, r *http.Request) {
 		if strings.TrimSpace(req.BaseURL) != "" { t.OppID = strings.TrimRight(req.BaseURL, "/") }
 	})
 	if err != nil { writeJSON(w,500,map[string]string{"error":err.Error()}); return }
+
+	if !t.Ready {
+		// Either opponent baseUrl is unknown, or peer is offline; in both cases do not decide turns
+		msg := "opponent is offline or baseUrl not set; turns not decided"
+		if strings.TrimSpace(t.OppID) == "" {
+			msg = "opponent baseUrl not set; turns not decided"
+		}
+		writeJSON(w, 409, map[string]any{
+			"error":   msg,
+			"myTurn":  t.MyTurn, "ready": t.Ready, "decided": t.Decided, "oppId": t.OppID,
+		})
+		return
+	}
 	writeJSON(w,200,map[string]any{"ok":true,"myTurn":t.MyTurn,"decided":t.Decided,"ready":t.Ready})
 }
+
 
 // POST /v1/turn/next   (attacker calls after local verify succeeds)
 func (s *Server) handleTurnNext(w http.ResponseWriter, r *http.Request) {
@@ -797,3 +969,35 @@ func (s *Server) handleGameReset(w http.ResponseWriter, r *http.Request) {
     if err != nil { writeJSON(w,500,map[string]string{"error":err.Error()}); return }
     writeJSON(w,200,map[string]any{"ok":true})
 }
+
+func shotKey(r, c int) string { return fmt.Sprintf("%d,%d", r, c) }
+
+
+// new: use /v1/turn (always exists)
+func (s *Server) ping(baseURL string) bool {
+    client := &http.Client{Timeout: 1500 * time.Millisecond}
+    resp, err := client.Get(strings.TrimRight(baseURL, "/") + "/v1/turn")
+    if err != nil { return false }
+    defer resp.Body.Close()
+    return resp.StatusCode == http.StatusOK
+}
+
+func (s *Server) peerStatus(baseURL string) (online bool, startedAt int64) {
+    if strings.TrimSpace(baseURL) == "" { return false, 0 }
+    url := strings.TrimRight(baseURL, "/") + "/v1/turn"
+    client := &http.Client{Timeout: 1500 * time.Millisecond}
+    resp, err := client.Get(url)
+    if err != nil { return false, 0 }
+    defer resp.Body.Close()
+    if resp.StatusCode != http.StatusOK { return false, 0 }
+
+    var m map[string]any
+    if err := json.NewDecoder(resp.Body).Decode(&m); err != nil { return false, 0 }
+
+    // Require a valid, non-zero startedAt; otherwise treat as "not ready"
+    if v, ok := m["startedAt"].(float64); ok && int64(v) > 0 {
+        return true, int64(v)
+    }
+    return false, 0
+}
+
