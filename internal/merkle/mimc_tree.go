@@ -22,7 +22,7 @@ func feBytes(x *big.Int) []byte {
 	return out
 }
 
-// maps bytes to a field element modulo p.
+// maps bytes to field element modulo p
 func bytesToFE(b []byte) *big.Int {
 	z := new(big.Int).SetBytes(b) 
 	z.Mod(z, fr.Modulus())
@@ -30,7 +30,6 @@ func bytesToFE(b []byte) *big.Int {
 }
 
 
-// MiMC helpers (off-chain), consistent with in-circuit MiMC
 func HashLeafMiMC(bit uint8) *big.Int {
 	h := bnmimc.NewMiMC()
 	h.Write(feBytes(new(big.Int).SetUint64(uint64(bit))))
@@ -44,10 +43,9 @@ func HashNodeMiMC(left, right *big.Int) *big.Int {
 	return bytesToFE(h.Sum(nil))
 }
 
-// Fixed-size binary Merkle tree stored level-by-level.
 type Tree struct {
 	Depth  int           `json:"depth"`
-	Levels [][]*big.Int  `json:"levels"` // Levels[0]=leaves, Levels[Depth]=root
+	Levels [][]*big.Int  `json:"levels"`
 }
 
 func BuildFixedTree(leavesBits []uint8, size int, padLeaf *big.Int,
@@ -62,7 +60,6 @@ func BuildFixedTree(leavesBits []uint8, size int, padLeaf *big.Int,
 
 	levels := make([][]*big.Int, 0)
 
-	// Level 0: leaves
 	L0 := make([]*big.Int, size)
 	for i := 0; i < size; i++ {
 		if i < len(leavesBits) {
@@ -73,7 +70,6 @@ func BuildFixedTree(leavesBits []uint8, size int, padLeaf *big.Int,
 	}
 	levels = append(levels, L0)
 
-	// Build up
 	n := size
 	for n > 1 {
 		n2 := n / 2
@@ -91,8 +87,6 @@ func BuildFixedTree(leavesBits []uint8, size int, padLeaf *big.Int,
 
 func (t *Tree) Root() *big.Int { return new(big.Int).Set(t.Levels[len(t.Levels)-1][0]) }
 
-// Path returns sibling hashes + direction bits for index idx.
-// dir[i]=0 ⇒ current is left child; dir[i]=1 ⇒ current is right child.
 func (t *Tree) Path(idx int) (path []*big.Int, dir []uint8, err error) {
 	if idx < 0 || idx >= len(t.Levels[0]) {
 		return nil, nil, errors.New("idx OOB")

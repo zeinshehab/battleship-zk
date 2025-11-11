@@ -8,7 +8,6 @@ import (
 
 const MerkleDepth = 7 // 128 leaves
 
-// ShotCircuit proves a single hit/miss matches the committed root.
 type ShotCircuit struct {
 	Bit  frontend.Variable              `gnark:",secret"`
 	Path [MerkleDepth]frontend.Variable `gnark:",secret"`
@@ -22,9 +21,9 @@ type ShotCircuit struct {
 }
 
 func (c *ShotCircuit) Define(api frontend.API) error {
-	api.AssertIsBoolean(c.Bit)      // Bit ∈ {0,1}
-	api.AssertIsBoolean(c.Hit)      // Hit ∈ {0,1}
-	api.AssertIsEqual(c.Hit, c.Bit) // reveal only Hit = Bit
+	api.AssertIsBoolean(c.Bit)
+	api.AssertIsBoolean(c.Hit)
+	api.AssertIsEqual(c.Hit, c.Bit)
 
 	h, err := mimc.NewMiMC(api)
 	if err != nil {

@@ -21,7 +21,6 @@ type ShotPublic struct {
 	Col  uint8    `json:"col"`
 }
 
-// Ensure proving/verifying keys exist (reads/writes via io.ReaderFrom / io.WriterTo).
 func EnsureShotKeys(dir string) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
@@ -29,25 +28,21 @@ func EnsureShotKeys(dir string) error {
 	vkPath := dir + "/shot.vk"
 	pkPath := dir + "/shot.pk"
 
-	// If both key files exist AND can be parsed, reuse them; else regenerate.
 	if vk, pk, err := readKeys(vkPath, pkPath); err == nil && vk != nil && pk != nil {
 		return nil
 	}
 
-	// Compile circuit once
 	var circuit ShotCircuit
 	cs, err := frontend.Compile(ecc.BN254.ScalarField(), r1cs.NewBuilder, &circuit)
 	if err != nil {
 		return err
 	}
 
-	// Setup
 	pk, vk, err := groth16.Setup(cs)
 	if err != nil {
 		return err
 	}
 
-	// Write keys
 	if err := writeVK(vkPath, vk); err != nil {
 		return err
 	}
@@ -57,7 +52,6 @@ func EnsureShotKeys(dir string) error {
 	return nil
 }
 
-// Prove one shot.
 func ProveShot(keysDir string, bit uint8, idx int, path []*big.Int, dir []uint8, root *big.Int, salt *big.Int) ([]byte, ShotPublic, error) {
 	if len(path) != MerkleDepth || len(dir) != MerkleDepth {
 		return nil, ShotPublic{}, errors.New("bad path length")
@@ -84,14 +78,12 @@ func ProveShot(keysDir string, bit uint8, idx int, path []*big.Int, dir []uint8,
 		Col:  col,
 	}
 
-	// witness assignment for the full circuit
 	assign.Bit = bit
 	for i := 0; i < MerkleDepth; i++ {
 		assign.Path[i] = path[i]
 		assign.Dir[i] = dir[i]
 	}
 
-	// compile and load PK
 	var circuit ShotCircuit
 	cs, err := frontend.Compile(ecc.BN254.ScalarField(), r1cs.NewBuilder, &circuit)
 	if err != nil {
@@ -102,7 +94,6 @@ func ProveShot(keysDir string, bit uint8, idx int, path []*big.Int, dir []uint8,
 		return nil, ShotPublic{}, err
 	}
 
-	// full witness and prove
 	fullWit, err := frontend.NewWitness(&assign, ecc.BN254.ScalarField())
 	if err != nil {
 		return nil, ShotPublic{}, err
@@ -112,7 +103,6 @@ func ProveShot(keysDir string, bit uint8, idx int, path []*big.Int, dir []uint8,
 		return nil, ShotPublic{}, err
 	}
 
-	// serialize proof
 	var buf bytes.Buffer
 	if _, err := proof.WriteTo(&buf); err != nil {
 		return nil, ShotPublic{}, err
@@ -120,7 +110,6 @@ func ProveShot(keysDir string, bit uint8, idx int, path []*big.Int, dir []uint8,
 	return buf.Bytes(), pub, nil
 }
 
-// Verify a shot proof. (Verify returns only error; nil => valid)
 func VerifyShot(vkPath string, proofBin []byte, pub ShotPublic, root *big.Int) (bool, error) {
 	if pub.Root == nil {
 		return false, errors.New("proof payload missing public root")
@@ -128,8 +117,6 @@ func VerifyShot(vkPath string, proofBin []byte, pub ShotPublic, root *big.Int) (
 	if pub.Root.Cmp(root) != 0 {
 		return false, errors.New("root mismatch: proof root != --root")
 	}
-
-	// build a PUBLIC ONLY witness using the actual circuit type (so it implements frontend.Circuit).
 
 	pubAssign := ShotCircuit{
 		Root: root,
@@ -143,7 +130,6 @@ func VerifyShot(vkPath string, proofBin []byte, pub ShotPublic, root *big.Int) (
 		return false, err
 	}
 
-	// Read VK and proof
 	vk, err := readVK(vkPath)
 	if err != nil {
 		return false, err
@@ -158,8 +144,6 @@ func VerifyShot(vkPath string, proofBin []byte, pub ShotPublic, root *big.Int) (
 	}
 	return true, nil
 }
-
-// --- key IO helpers using io.WriterTo / io.ReaderFrom ---
 
 func writeVK(path string, vk groth16.VerifyingKey) error {
 	f, err := os.Create(path)

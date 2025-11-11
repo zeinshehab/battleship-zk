@@ -72,7 +72,6 @@ func cmdCommit() {
 	if err := loadJSON(*boardPath, &b); err != nil { log.Fatal(err) }
 	if err := b.Validate(); err != nil { log.Fatal(err) }
 
-	// Build Merkle tree (MiMC)
 	leafHash := func(v uint8) *big.Int { return merkle.HashLeafMiMC(v) }
 	zeroLeaf := leafHash(0)
 	t, err := merkle.BuildFixedTree(b.Flatten(), 128, zeroLeaf, merkle.HashNodeMiMC)
@@ -91,10 +90,8 @@ func cmdCommit() {
 	// fmt.Println("SALT:", fmt.Sprintf("0x%x", salt))
 	// fmt.Println("Unsalted ROOT:", fmt.Sprintf("0x%x", treeRoot))
 
-	// Create ZK keys (or load if exist)
 	if err := zk.EnsureShotKeys(*keysDir); err != nil { log.Fatal(err) }
 
-	// Save defender secret (board + tree)
 	sec := codec.Secret{
 		Board:  b,
 		Tree:   t,
@@ -183,12 +180,10 @@ func cmdServe() {
     secret := fs.String("secret", "secret.json", "defender secret file")
     _ = fs.Parse(os.Args[2:])
 
-    // Ensure keys exist (optional)
     if err := zk.EnsureShotKeys(*keys); err != nil {
         log.Fatal(err)
     }
 
-    // Create server and routes
 	srv := server.New(*keys, *secret)
 	mux := http.NewServeMux()
 	srv.Routes(mux)

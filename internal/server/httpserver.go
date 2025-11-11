@@ -23,10 +23,9 @@ const totalShipCells = 17
 
 type Server struct {
 	KeysDir    string
-	SecretPath string          // kept for CLI compatibility; no longer used for I/O
-	VKPath     string          // e.g., KeysDir + "/shot.vk"
+	SecretPath string        
+	VKPath     string 
 
-	// In-memory state (no JSON persistence)
 	mu        sync.RWMutex
 	sec       *codec.Secret
 	peer      *PeerInfo
@@ -35,12 +34,12 @@ type Server struct {
 	lastEvt   *ShotEvent
 	shotsTried map[string]bool
 
-	// Milliseconds since epoch when THIS server booted (authoritative liveness marker)
+	// we use this just to be able to determine which server started first for turns
 	startAt int64
 }
 
 type PeerInfo struct {
-	BaseURL string `json:"baseUrl"`          // e.g. http://192.168.1.55:8081
+	BaseURL string `json:"baseUrl"`
 	RootHex string `json:"rootHex,omitempty"`
 	VKB64   string `json:"vkB64,omitempty"`
 }
@@ -48,7 +47,7 @@ type PeerInfo struct {
 func New(keysDir, secretPath string) *Server {
 	s := &Server{
 		KeysDir:     keysDir,
-		SecretPath:  secretPath, // kept but unused for storage
+		SecretPath:  secretPath,
 		VKPath:      filepath.Join(keysDir, "shot.vk"),
 		shotsTried:  make(map[string]bool),
 		startAt:     time.Now().UnixMilli(),
@@ -59,19 +58,13 @@ func New(keysDir, secretPath string) *Server {
 }
 
 func (s *Server) Routes(mux *http.ServeMux) {
-	// Actions you KEEP
 	mux.HandleFunc("/v1/init", s.handleInit)
 	mux.HandleFunc("/v1/commit", s.handleCommit)
 	mux.HandleFunc("/v1/shoot", s.handleShoot)
 	mux.HandleFunc("/v1/verify", s.handleVerify)
-
-	// Consolidated READ
 	mux.HandleFunc("/v1/status", s.handleStatus)
+	mux.HandleFunc("/v1/peer", s.handlePeerPut)
 
-	// Tightened pairing/handshake (idempotent)
-	mux.HandleFunc("/v1/peer", s.handlePeerPut) // expects PUT
-
-	// Serve embedded GUI at /
 	gui := http.FileServer(web.FS())
 	mux.Handle("/", gui)
 }
@@ -81,8 +74,6 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(v)
 }
-
-// === Secret / Root helpers ===
 
 func (s *Server) currentSecret() (*codec.Secret, error) {
 	s.mu.RLock()
@@ -106,7 +97,6 @@ func computeRootHex(sec *codec.Secret) (string, error) {
 	return fmt.Sprintf("0x%x", salted), nil
 }
 
-// === Init / Commit ===
 
 func (s *Server) handleInit(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodOptions {
@@ -149,19 +139,15 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// In-memory: store defender secret
 	s.mu.Lock()
 	s.sec = &res.Secret
 	s.mu.Unlock()
 
-	// Compute salted root and store in in-memory turn state
 	rootHex, _ := computeRootHex(&res.Secret)
 	_, _ = s.updateTurn(func(t *turnState) { t.MyRootHex = rootHex })
 
 	writeJSON(w, 200, map[string]any{"rootHex": rootHex})
 }
-
-// === Shoot / Verify ===
 
 type shootReq struct {
 	Row int `json:"row"`
@@ -183,7 +169,7 @@ func (s *Server) handleShoot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Turn gating: defender only accepts shot when opponent's turn (from our perspective)
+	// we only let shoot if it not my turn
 	t, err := s.loadTurn()
 	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": "failed to read turn state"})
@@ -198,7 +184,6 @@ func (s *Server) handleShoot(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	// Block if game is already over
 	if g, gErr := s.loadGame(); gErr == nil && g.Over {
 		writeJSON(w, 409, map[string]any{
 			"error":     "game is over",
@@ -209,7 +194,7 @@ func (s *Server) handleShoot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Duplicate-shot gating (reservation to avoid races)
+	// this to prevent duplicate shots on same cell
 	k := shotKey(req.Row, req.Col)
 	s.mu.Lock()
 	if s.shotsTried == nil {
@@ -227,12 +212,11 @@ func (s *Server) handleShoot(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	s.shotsTried[k] = true // reserve
+	s.shotsTried[k] = true
 	s.mu.Unlock()
 
 	sec, err := s.currentSecret()
 	if err != nil {
-		// rollback reservation
 		s.mu.Lock()
 		delete(s.shotsTried, k)
 		s.mu.Unlock()
@@ -242,7 +226,6 @@ func (s *Server) handleShoot(w http.ResponseWriter, r *http.Request) {
 
 	res, err := app.Shoot(*sec, s.KeysDir, req.Row, req.Col)
 	if err != nil {
-		// rollback reservation on failure so attacker can try again if needed
 		s.mu.Lock()
 		delete(s.shotsTried, k)
 		s.mu.Unlock()
@@ -250,10 +233,9 @@ func (s *Server) handleShoot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Defender: remember shot so UI can color own board
+	// this is just for coloring in the UI
 	s.recordShot(req.Row, req.Col, res.Bit)
 
-	// Update defense-side game state on hit
 	if res.Bit == 1 {
 		_, _ = s.updateGame(func(g *gameState) {
 			if !g.Over {
@@ -266,20 +248,17 @@ func (s *Server) handleShoot(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	// Include local VK as base64 (best effort)
 	var vkB64 string
 	if data, err := os.ReadFile(s.VKPath); err == nil && len(data) > 0 {
 		vkB64 = base64.StdEncoding.EncodeToString(data)
 	}
 
-	// Compute rootHex now (defender's current salted root)
 	rootHex, err := computeRootHex(sec)
 	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
 		return
 	}
 
-	// After receiving a valid shot, it's now our turn locally
 	_, _ = s.updateTurn(func(t *turnState) { t.MyTurn = "me" })
 
 	resp := map[string]any{
@@ -335,7 +314,6 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Attacker-side gating: only when it's our turn
 	t, err := s.loadTurn()
 	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": "failed to read turn state"})
@@ -360,9 +338,8 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// VK required (defender's VK)
 	if strings.TrimSpace(req.VKB64) == "" {
-		writeJSON(w, 400, map[string]string{"error": "vkB64 required (use defender's VK)"})
+		writeJSON(w, 400, map[string]string{"error": "vkB64 required"})
 		return
 	}
 	rawVK, err := base64.StdEncoding.DecodeString(req.VKB64)
@@ -370,7 +347,7 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]string{"error": "invalid vkB64"})
 		return
 	}
-	// Temporary file only for verifier API that expects a path (not JSON; ephemeral)
+	// i have this because the verify function i have now expects a path and not raw bytes (will change later)
 	f, err := os.CreateTemp("", "vk-*.vk")
 	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
@@ -386,7 +363,6 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 	vkPath := f.Name()
 	defer os.Remove(vkPath)
 
-	// Parse salted root (hex OR dec), but ignore any public.root in payload
 	var rootInt *big.Int
 	if strings.TrimSpace(req.RootHex) != "" {
 		h := req.RootHex
@@ -433,7 +409,6 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// If verification succeeded, it's now opponent's turn locally
 	if res.Valid {
 		_, _ = s.updateTurn(func(t *turnState) { t.MyTurn = "opponent" })
 	}
@@ -453,8 +428,6 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, 200, res)
 }
-
-// === Consolidated STATUS ===
 
 func (s *Server) loadVKB64() string {
 	data, err := os.ReadFile(s.VKPath)
@@ -487,7 +460,7 @@ func (s *Server) statusPayload() map[string]any {
 		"myRootHex":  t.MyRootHex,
 		"oppRootHex": t.OppRootHex,
 
-		"peer": peer, // snapshot of last-set peer (may be nil)
+		"peer": peer,
 
 		"turn": map[string]any{
 			"myTurn":  t.MyTurn,
@@ -513,7 +486,6 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, s.statusPayload())
 }
 
-// === Pairing / Handshake (PUT /v1/peer) ===
 
 func selfBaseURL(r *http.Request) string {
 	scheme := "http"
@@ -527,9 +499,9 @@ func selfBaseURL(r *http.Request) string {
 }
 
 type peerPutReq struct {
-	BaseURL string `json:"baseUrl"`           // required
-	RootHex string `json:"rootHex,omitempty"` // optional: opponent salted root
-	VKB64   string `json:"vkB64,omitempty"`   // optional: opponent VK (if shared OOB)
+	BaseURL string `json:"baseUrl"`
+	RootHex string `json:"rootHex,omitempty"`
+	VKB64   string `json:"vkB64,omitempty"`
 }
 
 func (s *Server) handlePeerPut(w http.ResponseWriter, r *http.Request) {
@@ -548,7 +520,6 @@ func (s *Server) handlePeerPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// In-memory peer snapshot
 	s.mu.Lock()
 	s.peer = &PeerInfo{
 		BaseURL: strings.TrimRight(req.BaseURL, "/"),
@@ -557,7 +528,6 @@ func (s *Server) handlePeerPut(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Unlock()
 
-	// Update turn state: ensure MyID set (if empty), set OppID and (optionally) OppRootHex
 	_, _ = s.updateTurn(func(t *turnState) {
 		if strings.TrimSpace(t.MyID) == "" {
 			t.MyID = selfBaseURL(r)
@@ -572,11 +542,10 @@ func (s *Server) handlePeerPut(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, s.statusPayload())
 }
 
-// === CORS ===
 
 func WithCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// In dev we allow any origin. For production, set this to the specific origin(s).
+		// this doesn't matter much for demo
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET,POST,PUT,OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
@@ -588,10 +557,8 @@ func WithCORS(next http.Handler) http.Handler {
 	})
 }
 
-// === Turn state & decision (in-memory) ===
-
 type turnState struct {
-	MyTurn     string `json:"myTurn"` // "me" | "opponent" | ""
+	MyTurn     string `json:"myTurn"` 
 	MyRootHex  string `json:"myRootHex,omitempty"`
 	OppRootHex string `json:"oppRootHex,omitempty"`
 	Ready      bool   `json:"ready"`
@@ -616,7 +583,6 @@ func normalizeID(sid string) string {
 	return strings.ToLower(sid)
 }
 
-// Liveness via /v1/status (always available)
 func (s *Server) ping(baseURL string) bool {
 	client := &http.Client{Timeout: 1500 * time.Millisecond}
 	resp, err := client.Get(strings.TrimRight(baseURL, "/") + "/v1/status")
@@ -627,7 +593,6 @@ func (s *Server) ping(baseURL string) bool {
 	return resp.StatusCode == http.StatusOK
 }
 
-// Reads /v1/status from peer and extracts startedAt
 func (s *Server) peerStatus(baseURL string) (online bool, startedAt int64) {
 	if strings.TrimSpace(baseURL) == "" {
 		return false, 0
@@ -652,8 +617,7 @@ func (s *Server) peerStatus(baseURL string) (online bool, startedAt int64) {
 	return false, 0
 }
 
-// Decide exactly once using server start timestamps (tie-break by ID if equal)
-// After Decided=true, we never change MyTurn again; we only refresh Ready.
+// we decide turn by timestamp
 func (s *Server) updateTurn(mut func(*turnState)) (*turnState, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -661,7 +625,6 @@ func (s *Server) updateTurn(mut func(*turnState)) (*turnState, error) {
 	if s.turn == nil {
 		s.turn = &turnState{}
 	}
-	// Apply mutation (may set MyID/OppID/roots)
 	mut(s.turn)
 
 	myID := normalizeID(s.turn.MyID)
@@ -673,21 +636,18 @@ func (s *Server) updateTurn(mut func(*turnState)) (*turnState, error) {
 		online, oppStarted = s.peerStatus(oppID)
 	}
 
-	// If already decided, never change who starts; just refresh connectivity
 	if s.turn.Decided {
 		s.turn.Ready = haveIDs && online
 		cp := *s.turn
 		return &cp, nil
 	}
 
-	// Decide exactly once when BOTH have valid start timestamps
 	myStarted := s.startAt
 	if haveIDs && online && myStarted > 0 && oppStarted > 0 {
 		var iStart bool
 		if myStarted != oppStarted {
-			iStart = myStarted < oppStarted // earlier server starts
+			iStart = myStarted < oppStarted
 		} else {
-			// Millisecond tie — break deterministically by normalized IDs
 			iStart = myID < oppID
 		}
 		if iStart {
@@ -698,7 +658,6 @@ func (s *Server) updateTurn(mut func(*turnState)) (*turnState, error) {
 		s.turn.Ready = true
 		s.turn.Decided = true
 	} else {
-		// Not ready to decide yet
 		s.turn.Ready = false
 		s.turn.Decided = false
 	}
@@ -707,14 +666,12 @@ func (s *Server) updateTurn(mut func(*turnState)) (*turnState, error) {
 	return &cp, nil
 }
 
-// === Defense last-shot (in-memory) ===
-
 type ShotEvent struct {
 	Row int   `json:"row"`
 	Col int   `json:"col"`
-	Bit uint8 `json:"bit"` // 0 miss, 1 hit
-	N   int   `json:"n"`   // monotonic counter
-	At  int64 `json:"at"`  // unix ms
+	Bit uint8 `json:"bit"`
+	N   int   `json:"n"` 	// counter
+	At  int64 `json:"at"` 	//time
 }
 
 func (s *Server) recordShot(row, col int, bit uint8) {
@@ -730,13 +687,11 @@ func (s *Server) recordShot(row, col int, bit uint8) {
 	}
 }
 
-// === Game state (in-memory) ===
-
 type gameState struct {
-	HitsTaken int    `json:"hitsTaken"` // opponent hit my ships (defense)
-	HitsDealt int    `json:"hitsDealt"` // I hit opponent ships (attack verify)
+	HitsTaken int    `json:"hitsTaken"`
+	HitsDealt int    `json:"hitsDealt"`
 	Over      bool   `json:"over"`
-	Winner    string `json:"winner"` // "me" | "opponent" | ""
+	Winner    string `json:"winner"`
 }
 
 func (s *Server) loadGame() (*gameState, error) {
@@ -759,7 +714,5 @@ func (s *Server) updateGame(mut func(*gameState)) (*gameState, error) {
 	cp := *s.game
 	return &cp, nil
 }
-
-// === Misc helpers ===
 
 func shotKey(r, c int) string { return fmt.Sprintf("%d,%d", r, c) }

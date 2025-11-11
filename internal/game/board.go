@@ -5,13 +5,11 @@ import (
 	"math/rand"
 )
 
-// Board is a 10x10 grid. Cell: 0=water, 1=ship.
 type Board struct { Cells [10][10]uint8 }
 
 var shipSizes = []int{5,4,3,3,2} // total 17
 
 func (b *Board) Validate() error {
-	// zero/one and count==17
 	total := 0
 	for r:=0; r<10; r++ { for c:=0; c<10; c++ {
 		v := b.Cells[r][c]
@@ -32,7 +30,7 @@ func (b *Board) Flatten() []uint8 {
 	return out
 }
 
-// GenerateRandomBoard places standard ships without overlap (no adjacency rule enforced for MVP).
+// this has no overlap
 func GenerateRandomBoard() (Board, error) {
 	var b Board
 	tries := 0

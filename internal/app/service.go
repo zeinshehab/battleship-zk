@@ -25,7 +25,6 @@ func Commit(b game.Board, keysDir string) (*CommitResult, error) {
 		return nil, err
 	}
 
-	// Build Merkle tree (MiMC)
 	leafHash := func(v uint8) *big.Int { return merkle.HashLeafMiMC(v) }
 	zeroLeaf := leafHash(0)
 	t, err := merkle.BuildFixedTree(b.Flatten(), 128, zeroLeaf, merkle.HashNodeMiMC)
@@ -34,7 +33,7 @@ func Commit(b game.Board, keysDir string) (*CommitResult, error) {
 	}
 	treeRoot := t.Root()
 
-	// Generate 32-byte salt and compute salted root = H(salt, treeRoot)
+	// this is to make root unique for same boards
 	saltBytes := make([]byte, 32)
 	if _, err := rand.Read(saltBytes); err != nil {
 		return nil, err
@@ -43,12 +42,10 @@ func Commit(b game.Board, keysDir string) (*CommitResult, error) {
 	saltedRoot := merkle.HashNodeMiMC(salt, treeRoot)
 	rootHex := fmt.Sprintf("0x%x", saltedRoot)
 
-	// Ensure keys exist
 	if err := zk.EnsureShotKeys(keysDir); err != nil {
 		return nil, err
 	}
 
-	// Persist secret (board + tree + salt)
 	sec := codec.Secret{
 		Board:   b,
 		Tree:    t,
@@ -60,7 +57,7 @@ func Commit(b game.Board, keysDir string) (*CommitResult, error) {
 
 type ShootResult struct {
 	Payload codec.ShotProofPayload
-	Bit     uint8 // redundant with Public.Hit, kept for compatibility
+	Bit     uint8
 }
 
 func Shoot(sec codec.Secret, keysDir string, row, col int) (*ShootResult, error) {
@@ -71,7 +68,6 @@ func Shoot(sec codec.Secret, keysDir string, row, col int) (*ShootResult, error)
 		return nil, fmt.Errorf("missing or invalid salt in secret")
 	}
 
-	// Parse salt and compute proof with (treeRoot, salt)
 	salt, ok := new(big.Int).SetString(sec.SaltHex[2:], 16)
 	if !ok {
 		return nil, fmt.Errorf("cannot parse salt hex")
@@ -88,7 +84,6 @@ func Shoot(sec codec.Secret, keysDir string, row, col int) (*ShootResult, error)
 		return nil, fmt.Errorf("bad path length")
 	}
 
-	// Matches client/server code path: include salt
 	proof, pub, err := zk.ProveShot(keysDir, bit, idx, path, dir, treeRoot, salt)
 	if err != nil {
 		return nil, err
@@ -105,14 +100,10 @@ type VerifyResult struct {
 	Hit   uint8
 }
 
-// VerifyWithRoot: ensure the public Root is set to the trusted root we're given
 func VerifyWithRoot(vkPath string, root *big.Int, payload codec.ShotProofPayload) (*VerifyResult, error) {
-	// Some callers (e.g., HTTP verify handler) sanitize the payload and remove public.root
-	// to avoid JS sci-notation issues. Populate it here from the trusted root param.
 	if payload.Public.Root == nil {
 		payload.Public.Root = new(big.Int).Set(root)
 	} else if payload.Public.Root.Sign() == 0 {
-		// In case it's a zero-value big.Int (value type), copy into it.
 		payload.Public.Root = new(big.Int).Set(root)
 	}
 
