@@ -2,7 +2,7 @@
 
 The defender commits to a hidden board, and for every shot returns a zero-knowledge proof of hit/miss that anyone can verify without revealing the board.
 
-- CLI: `init`, `commit`, `shoot`, `verify`
+- CLI: `init`, `commit`, `shoot`, `verify`, `serve`
 
 ## Install & Build
 - You need Go version 1.24 minimum
@@ -10,14 +10,6 @@ The defender commits to a hidden board, and for every shot returns a zero-knowle
 - go build -o battleship ./cmd/battleship
 
 ---
-
-## How It Works
-
-- Commit: The defender turns a 10×10 bitboard (1=ship, 0=water) into a 128-leaf MiMC Merkle tree and shares the root and the verification key.
-- Shot: The attacker calls a coordinate (r,c). The defender returns a Groth16 proof that the bit at (r,c) opens to the committed root, revealing only HIT/MISS.
-- Verify: Anyone verifies the proof using the defender’s verifying key and root.
-
-The root is the identifier of the board being attacked so if you use a different root for another board it will fail.
 
 ## Usage (One player)
 
@@ -68,13 +60,10 @@ Then we just swap the roles for A to defend and B to attack.
 
 ### How to play on Web UI
 
-Create one folder for each player containing the game executable.
+Create one folder for each player containing the game executable you compiled earlier.
 
-Example of how to run the server for Player A
+Run the server for Player A (do the same for B):
 ```
 ./battleship serve --addr :8080 --keys ./keysA --secret ./secretA.json
 ```
-
-Go to your chosen browser and enter the ip with your chosen port number.
-
-Place the IP and the port number of your opponent and Play !
+then visit IP 
