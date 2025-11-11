@@ -4,42 +4,28 @@ const oppBoardEl = $("#oppBoard");
 const statusEl = $("#status");
 const startBtn = $("#startBtn");
 const opponentUrlInput = $("#opponentUrl");
+
 let incomingOnMyBoard = {};  // key "r,c" -> 'oppHit' | 'oppMiss'
 let lastIncomingN = 0;
 
-
 // local state
-let yourBoard = null;      // 10x10 numbers from /v1/init
-let opponent = null;       // { baseUrl, rootHex, vkB64 }
-let shotState = {};        // key "r,c" -> 'hit' | 'miss'
+let yourBoard = null;                // 10x10 numbers from /v1/init
+let opponent = null;                 // { baseUrl, rootHex, vkB64 }
+let shotState = {};                  // key "r,c" -> 'hit' | 'miss'
 
+// ---------- helpers ----------
 function setStatus(text, ok = true) {
   statusEl.textContent = text;
   statusEl.style.color = ok ? "#14532d" : "#7f1d1d";
 }
-
 function gridKey(r,c) { return `${r},${c}`; }
 
-// ---------- helpers ----------
-async function postJSON(url, obj) {
+async function requestJSON(url, method = "GET", body) {
   const res = await fetch(url, {
-    method: "POST",
+    method,
     headers: {"content-type":"application/json"},
-    body: JSON.stringify(obj || {})
+    body: body ? JSON.stringify(body) : undefined
   });
-  if (!res.ok) {
-    let msg = `HTTP ${res.status}`;
-    try {
-      const data = await res.json();
-      if (data && data.error) msg += `: ${data.error}`;
-    } catch {}
-    throw new Error(msg);
-  }
-  return await res.json();
-}
-
-async function getJSON(url) {
-  const res = await fetch(url, { method: "GET", headers: {"content-type":"application/json"} });
   if (!res.ok) {
     let msg = `HTTP ${res.status}`;
     try { const d = await res.json(); if (d && d.error) msg += `: ${d.error}` } catch {}
@@ -47,27 +33,60 @@ async function getJSON(url) {
   }
   return await res.json();
 }
+const getJSON = (url) => requestJSON(url, "GET");
+const postJSON = (url, obj) => requestJSON(url, "POST", obj);
+const putJSON  = (url, obj) => requestJSON(url, "PUT", obj);
 
-// ---------- turns UI ----------
-async function refreshTurn() {
+// ---------- unified status polling ----------
+async function readStatus() {
   try {
-    const t = await getJSON('/v1/turn'); // {myTurn, ready, decided, ...}
-    const canClick = !!t && t.decided === true && t.ready === true && t.myTurn === 'me';
-
-    statusEl.textContent = canClick ? "Your turn" :
-                           (t && t.decided ? "Opponent’s turn" : "Deciding turns…");
-
-    // gate clicks strictly on decided+ready+myTurn==='me'
-    oppBoardEl.style.pointerEvents = canClick ? 'auto' : 'none';
-    oppBoardEl.style.opacity = canClick ? '1' : '0.5';
-  } catch (err) {
-    // on error, be safe: disable clicking
-    oppBoardEl.style.pointerEvents = 'none';
-    oppBoardEl.style.opacity = '0.5';
+    return await getJSON('/v1/status'); // { startedAt, myId, oppId, myRootHex, oppRootHex, peer, turn, game, vkB64, defenseLast }
+  } catch (e) {
+    return null;
   }
 }
 
+async function refreshTurn() {
+  const s = await readStatus();
+  if (!s || !s.turn) {
+    oppBoardEl.style.pointerEvents = 'none';
+    oppBoardEl.style.opacity = '0.5';
+    return;
+  }
+  const t = s.turn;
+  const canClick = t.decided === true && t.ready === true && t.myTurn === 'me';
+  statusEl.textContent = canClick ? "Your turn" :
+                         (t && t.decided ? "Opponent’s turn" : "Deciding turns…");
+  oppBoardEl.style.pointerEvents = canClick ? 'auto' : 'none';
+  oppBoardEl.style.opacity = canClick ? '1' : '0.5';
+}
 
+async function refreshGameState() {
+  const s = await readStatus();
+  if (!s || !s.game) return false;
+  const g = s.game; // {hitsTaken,hitsDealt,over,winner}
+  if (g.over) {
+    oppBoardEl.style.pointerEvents = 'none';
+    oppBoardEl.style.opacity = '0.5';
+    const msg = g.winner === 'me' ? 'You win!' :
+                g.winner === 'opponent' ? 'You lost.' :
+                'Game over.';
+    setStatus(msg, true);
+    return true;
+  }
+  return false;
+}
+
+async function pollIncomingDefense() {
+  const s = await readStatus();
+  if (!s || !s.defenseLast) return;
+  const ev = s.defenseLast; // {n,row,col,bit,at} or {n:0}
+  if (!ev.n || ev.n <= lastIncomingN) return;
+  lastIncomingN = ev.n;
+  const k = `${ev.row},${ev.col}`;
+  incomingOnMyBoard[k] = (ev.bit === 1) ? 'oppHit' : 'oppMiss';
+  drawBoard(yourBoardEl, false, true);
+}
 
 // ---------- boards ----------
 function drawBoard(container, clickable, showShips = false) {
@@ -92,14 +111,12 @@ function drawBoard(container, clickable, showShips = false) {
       }
 
       const k = `${r},${c}`;
-
-      // ✅ Paint ONLY attacker's shots on the opponent board (right)
+      // Paint ONLY attacker's shots on the opponent board (right)
       if (clickable) {
         if (shotState[k] === "hit")  cell.classList.add("hit");
         if (shotState[k] === "miss") cell.classList.add("miss");
       }
-
-      // ✅ Paint ONLY opponent's shots on my board (left)
+      // Paint ONLY opponent's shots on my board (left)
       if (!clickable) {
         const mk = incomingOnMyBoard && incomingOnMyBoard[k];
         if (mk === 'oppHit')  cell.classList.add('opp-hit');
@@ -111,27 +128,17 @@ function drawBoard(container, clickable, showShips = false) {
   }
 }
 
-
-async function pollIncomingDefense() {
-  try {
-    const ev = await getJSON('/v1/defense/last'); // {n,row,col,bit,at} or {n:0}
-    if (!ev || !ev.n || ev.n <= lastIncomingN) return;
-
-    lastIncomingN = ev.n;
-    const k = `${ev.row},${ev.col}`;
-    incomingOnMyBoard[k] = (ev.bit === 1) ? 'oppHit' : 'oppMiss';
-
-    // redraw your board to show new mark
-    drawBoard(yourBoardEl, false, true);
-  } catch (e) {
-    // ignore transient errors
-  }
-}
-
-
+// ---------- start flow (new APIs) ----------
 async function onStartClick() {
   const oppUrl = opponentUrlInput.value.trim().replace(/\/+$/,'');
   if (!oppUrl) { setStatus("Enter opponent URL first.", false); return; }
+
+  const myOrigin = window.location.origin.replace(/\/+$/, '');
+  if (oppUrl === myOrigin) {
+    setStatus("You cannot use your own URL as the opponent.", false);
+    return;
+  }
+
   opponent = { baseUrl: oppUrl, rootHex: null, vkB64: null };
 
   try {
@@ -139,30 +146,37 @@ async function onStartClick() {
     yourBoard = await postJSON('/v1/init', {});
     await postJSON('/v1/commit', { board: yourBoard });
 
-    // identify myself (used for ID-based starter)
-    await postJSON('/v1/turn/self', { baseUrl: window.location.origin });
+    // 1) Tell our server who the peer is (idempotent)
+    //    This also sets our MyID automatically on the server (it derives from the request).
+    let s1 = await putJSON('/v1/peer', { baseUrl: opponent.baseUrl });
 
-    // IMPORTANT: tell our server the opponent ID *immediately*
-    await postJSON('/v1/turn/opponent', { baseUrl: opponent.baseUrl });
-
-    // best-effort: push our info to the opponent (optional)
-    try { await postJSON('/v1/send-info', { toBaseUrl: oppUrl }); } catch {}
-
-    // try to pull opponent info; if available, tell server again with root
+    // 2) Best-effort: pull opponent status (to learn their root/vk if available)
     try {
-      const oppInfo = await getJSON(`${oppUrl}/v1/info`);
-      if (oppInfo && oppInfo.rootHex && oppInfo.vkB64) {
-        opponent.rootHex = oppInfo.rootHex;
-        opponent.vkB64   = oppInfo.vkB64;
-        await postJSON('/v1/turn/opponent', {
+      const oppStatus = await getJSON(`${oppUrl}/v1/status`);
+
+      if (!oppStatus || !oppStatus.startedAt) {
+        setStatus("Opponent server is not ready or returned invalid data.", false);
+        return;
+      }
+
+      if (oppStatus && (oppStatus.myRootHex || oppStatus.vkB64)) {
+        opponent.rootHex = oppStatus.myRootHex || null;
+        opponent.vkB64   = oppStatus.vkB64   || null;
+
+        // 3) Send the extra info back to our server (idempotent)
+        s1 = await putJSON('/v1/peer', {
           baseUrl: opponent.baseUrl,
-          rootHex: opponent.rootHex
+          rootHex: opponent.rootHex || "",
+          vkB64:   opponent.vkB64   || ""
         });
       }
-    } catch {}
+    } catch {
+        setStatus("Opponent is offline or URL is incorrect.", false);
+        return;
+    }
 
     drawBoard(yourBoardEl, false, true);
-    drawBoard(oppBoardEl, true, false);   // visually ready, but clicks will be gated below
+    drawBoard(oppBoardEl, true, false);
     await refreshTurn();
     setStatus("Ready. Waiting for turns to be decided…", true);
   } catch (e) {
@@ -171,19 +185,24 @@ async function onStartClick() {
   }
 }
 
+// ---------- shooting flow ----------
 async function onShootCell(e) {
   const cell = e.currentTarget;
   const r = parseInt(cell.dataset.r, 10);
   const c = parseInt(cell.dataset.c, 10);
   if (!opponent || !opponent.baseUrl) { setStatus("Click Start first.", false); return; }
-  if (await refreshGameState()) return; // New
+  if (await refreshGameState()) return;
 
   try {
-    const t = await getJSON('/v1/turn');
-    if (!t || t.myTurn !== 'me') { setStatus("Not your turn.", false); return; }
+    const s = await readStatus();
+    if (!s || !s.turn || s.turn.myTurn !== 'me' || !s.turn.ready || !s.turn.decided) {
+      setStatus("Not your turn.", false);
+      return;
+    }
 
     const shot = await postJSON(`${opponent.baseUrl}/v1/shoot`, { row: r, col: c });
 
+    // Prefer the values returned by /v1/shoot; fall back to what we learned earlier
     const rootHex = shot.rootHex || opponent.rootHex;
     const vkB64   = shot.vkB64   || opponent.vkB64;
     if (!rootHex || !vkB64) { setStatus("Missing opponent root/vk.", false); return; }
@@ -194,21 +213,18 @@ async function onShootCell(e) {
       vkB64:   vkB64
     });
 
-    const hit = verify && verify.Hit === 1;
-    shotState[`${r},${c}`] = hit ? "hit" : "miss";
+    const hit = verify && (verify.Hit === 1 || verify.hit === 1);
+    shotState[gridKey(r,c)] = hit ? "hit" : "miss";
     drawBoard(oppBoardEl, true, false);
-    await refreshGameState(); // NEW
+    await refreshGameState();
     setStatus(hit ? `Hit (${r},${c})` : `Miss (${r},${c})`, true);
 
-    if (verify.Valid) {
-      await postJSON('/v1/turn/next', {});
-      await refreshTurn();
-    }
+    // No need to call /v1/turn/next — the server flips on successful verify.
+    await refreshTurn();
   } catch (e2) {
     setStatus(`Shot failed: ${e2.message}`, false);
   }
 }
-
 
 function persistShotState() {
   try {
@@ -218,31 +234,14 @@ function persistShotState() {
   }
 }
 
-// New
-async function refreshGameState() {
-  try {
-    const g = await getJSON('/v1/game/state'); // {hitsTaken,hitsDealt,over,winner}
-    if (g && g.over) {
-      oppBoardEl.style.pointerEvents = 'none';
-      oppBoardEl.style.opacity = '0.5';
-      const msg = g.winner === 'me' ? 'You win!' :
-                  g.winner === 'opponent' ? 'You lost.' :
-                  'Game over.';
-      setStatus(msg, true);
-      return true;
-    }
-  } catch (e) { /* ignore */ }
-  return false;
-}
-
+// ---------- bootstrap ----------
 startBtn.addEventListener("click", onStartClick);
 window.addEventListener('DOMContentLoaded', async () => {
   drawBoard(yourBoardEl, false, true);
   drawBoard(oppBoardEl, true, false);
   await refreshTurn();
   setInterval(refreshTurn, 1000);
-  setInterval(pollIncomingDefense, 1200); // ~1.2s polling
-  await refreshGameState(); // NEW
-  setInterval(refreshGameState, 1000); // NEW: keep an eye on opponent victory
-
+  setInterval(pollIncomingDefense, 1200);
+  await refreshGameState();
+  setInterval(refreshGameState, 1000);
 });
