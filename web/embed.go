@@ -6,6 +6,7 @@ import (
 	"net/http"
 )
 
+//go:embed index.html app.js styles.css
 var content embed.FS
 
 func FS() http.FileSystem {
